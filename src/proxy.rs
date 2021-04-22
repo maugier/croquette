@@ -6,7 +6,7 @@ use tokio::net::{
 use tokio_util::codec::{Decoder, Framed};
 use irc_proto::{Command, IrcCodec, Message, Prefix, Response};
 use futures::{SinkExt, StreamExt, select, stream::SplitSink};
-use rasta::{Credentials, Handle, ServerMessage, schema::{Room, ShortUser, UserID}, session::Session};
+use rasta::{Credentials, Handle, Rasta, ServerMessage, schema::{Room, ShortUser, UserID}, session::Session};
 use crate::{event::ChatEvent, util::lazy_zip};
 use log::{trace,debug,info,warn,error};
 
@@ -147,6 +147,23 @@ async fn login(c: &mut IRCConn, host: String) -> Result<ClientInfo> {
 
 }
 
+async fn recover_username(c: &mut Rasta, id: &UserID) -> Result<String> {
+    loop {
+        match c.recv().await? {
+            ServerMessage::Added { collection, id: found, fields  } 
+                if &collection == "users" && id == &*found => {
+                    return Ok(fields.ok_or(anyhow!("fields was missing"))?
+                             .as_object().ok_or(anyhow!("fields wasn't an object"))?
+                             .get("username").ok_or(anyhow!("username was missing"))?
+                             .as_str().ok_or(anyhow!("username wasn't as string"))?
+                             .to_string()
+                    )
+                },
+            _ => {},
+        }
+    }
+}
+
 pub struct Proxy {
     clientinfo: ClientInfo,
     userid: UserID,
@@ -158,13 +175,19 @@ pub struct Proxy {
 
 impl Proxy {
 
+    async fn respond(&mut self, code: Response, args: Vec<String>) -> Result<()> {
+        let msg = server_response(&self.server_addr, 
+            self.clientinfo.nick.clone(), code, args);
+        Ok(self.client_up.send(msg).await?)
+    }
+
     async fn run(sock: TcpStream, peer: SocketAddr, server_addr: String) -> Result<()> {
 
         let mut client = irc_proto::IrcCodec::new("utf8")?
             .framed(sock);
 
-        let clientinfo = login(&mut client, peer.ip().to_string()).await?;
-        debug!("Client logged in as {}", clientinfo);
+        let mut clientinfo = login(&mut client, peer.ip().to_string()).await?;
+        debug!("Client identified as {}", clientinfo);
 
         let mut back = rasta::Rasta::connect(&server_addr).await?;
         info!("Backend connected");
@@ -183,6 +206,10 @@ impl Proxy {
             }
         };
         
+        let nick = recover_username(&mut back, &userid).await?;
+        client.send(clientinfo.echo_back(Command::NICK(nick.clone()))).await?;
+        clientinfo.nick = nick;
+
         let mut server_up = back.handle();
         let session = Session::from(&mut back).await?;
 
@@ -261,6 +288,9 @@ impl Proxy {
                         warn!("Other room types not supported");
                     }
                 }
+            }
+            Message { command: Command::NICK(_),..} => {
+                self.respond(Response::ERR_NICKNAMEINUSE, vec!["Can't change your nick in rocket, sorry :(".into()]).await?
             }
             Message { command: Command::PING(a,b), ..} => {
                 self.client_up.send(Message { tags: None,
