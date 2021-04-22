@@ -1,7 +1,6 @@
 use anyhow::Result;
 
 mod proxy;
-mod event;
 mod util;
 
 #[tokio::main]

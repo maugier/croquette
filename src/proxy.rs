@@ -6,8 +6,8 @@ use tokio::net::{
 use tokio_util::codec::{Decoder, Framed};
 use irc_proto::{Command, IrcCodec, Message, Prefix, Response};
 use futures::{SinkExt, StreamExt, select, stream::SplitSink};
-use rasta::{Credentials, Handle, Rasta, ServerMessage, schema::{Room, ShortUser, UserID}, session::Session};
-use crate::{event::ChatEvent, util::lazy_zip};
+use rasta::{Credentials, Handle, Rasta, ServerMessage, schema::{MessageID, Room, RoomEvent, RoomEventData, RoomExtraInfo, ShortUser, UserID}, session::Session};
+use crate::util::{Cache, lazy_zip};
 use log::{trace,debug,info,warn,error};
 
 
@@ -171,6 +171,7 @@ pub struct Proxy {
     server_up: Handle,
     client_up: SplitSink<IRCConn, Message>,
     server_addr: String,
+    message_cache: Cache<MessageID>,
 }
 
 impl Proxy {
@@ -180,6 +181,26 @@ impl Proxy {
             self.clientinfo.nick.clone(), code, args);
         Ok(self.client_up.send(msg).await?)
     }
+
+    /*
+    async fn send_server_message(&mut self, target: &str, payload: String) -> Result<()> {
+
+        let room = match target.strip_prefix('#') {
+            Some(name) => match self.session.room_by_name(name) {
+                Some(r) => r,
+                None => return Ok(()),
+            },
+            None => {
+                self.session.direct_room(&mut self.server_up, &target).await?
+            }
+        };
+
+        let id = MessageID::new();
+        self.server_up.send_message(id.clone(), room, payload).await?;
+        self.message_cache.send(id);
+        Ok(())
+    }
+    */
 
     async fn run(sock: TcpStream, peer: SocketAddr, server_addr: String) -> Result<()> {
 
@@ -213,7 +234,7 @@ impl Proxy {
         let mut server_up = back.handle();
         let session = Session::from(&mut back).await?;
 
-        for room in &session.rooms {
+        for room in session.rooms() {
             match room {
                 Room::Chat { name, topic, ..} => {
                     let channel_name= format!("#{}", name);
@@ -246,7 +267,7 @@ impl Proxy {
         let mut server_down = back.stream().fuse();
 
         let mut proxy = Proxy { clientinfo, userid, session,
-            server_up, client_up, server_addr };
+            server_up, client_up, server_addr, message_cache: Cache::new(MessageID::new, 256) };
 
         loop {
 
@@ -254,12 +275,12 @@ impl Proxy {
 
                 msg = client_down.next() => {
                     let msg = msg.ok_or(anyhow!("Client closed connection"))??;
-                    proxy.client_message(msg).await?;
+                    proxy.handle_client_message(msg).await?;
                 },
 
                 msg = server_down.next() => {
                     let msg = msg.ok_or(anyhow!("Server closed connection"))?;
-                    proxy.server_message(msg).await?;
+                    proxy.handle_server_message(msg).await?;
                 },
 
             }
@@ -269,7 +290,9 @@ impl Proxy {
     }
 
 
-    async fn client_message(&mut self, msg: Message) -> Result<()> {
+    
+
+    async fn handle_client_message(&mut self, msg: Message) -> Result<()> {
         match msg {
             Message { command: Command::JOIN(chanlist, keys, _), ..} => {
                 let chanlist = chanlist.split(",");
@@ -300,14 +323,16 @@ impl Proxy {
             },
 
             Message { command: Command::PRIVMSG(target, payload),..} => {
-                let session = &self.session;
-                if let Some(room) = target.strip_prefix('#')
-                    .and_then(|chan| session.room_by_name(chan)) {
-                    self.server_up.send_message(&room, payload).await?;
-                } else {
-                    let direct = self.session.direct_room(&mut self.server_up, &target).await?;
-                    self.server_up.send_message(&direct, payload).await?;
-                }
+                let room = self.session.room_by_target(&mut self.server_up, &target).await;
+                let room = match room {
+                    Some(room) => room,
+                    None => return Ok(()),
+                };
+
+                let id = self.message_cache.send();
+                self.server_up.send_message(id, room, payload).await?;
+
+
             },
             Message { command: Command::TOPIC(target, topic),..} => {
                 let session = &self.session;
@@ -328,16 +353,65 @@ impl Proxy {
         Ok(())
     }
     
-    async fn server_message(&mut self, msg: ServerMessage) -> Result<()> {
+    async fn handle_server_message(&mut self, msg: ServerMessage) -> Result<()> {
         match msg {
             ServerMessage::Changed { fields: Some(obj), ..} => {
+
+                let event: RoomEvent = match serde_json::from_value(obj) {
+                    Ok(evt) => evt,
+                    Err(e) => {
+                        warn!("Could not parse event info: {}", e);
+                        return Ok(())
+                    },
+                };
+
+                let remote_host = self.server_addr.clone();
+
+                match (event.args.0, event.args.1) {
+                    ( RoomEventData {t: Some(t), msg, u, ..} 
+                    , RoomExtraInfo { room_name: Some(room_name) , room_type: 'c', ..}) 
+                        if &t == "room_changed_topic" => {
+                            //ChatEvent::TopicChange { user: u.username, room_name, topic: msg }
+                                let chan = format!("#{}", room_name);
+                                let out = Message { tags: None, prefix: Some(Prefix::Nickname(u.username.clone(), u.username, remote_host)) ,
+                                          command: Command::TOPIC(chan, Some(msg))};
+                                self.client_up.send(out).await?;
+                    },
+        
+                    ( red, RoomExtraInfo { room_name: Some(room_name), room_type: 'c', ..}) => {
+                        if self.message_cache.sent(red.id) {
+                            debug!("Ignoring own message");
+                            return Ok(())
+                        }
+                        let chan = format!("#{}", room_name);
+                        let from = red.u.username;
+                        let out = Message { tags: None, prefix: Some(Prefix::Nickname(from.clone(), from, remote_host)),
+                                    command: Command::PRIVMSG(chan, red.msg)};
+                        self.client_up.send(out).await?;
+            },
+        
+                    ( red, RoomExtraInfo { room_name: None, room_type: 'd',..}) => {
+                        if self.message_cache.sent(red.id) {
+                            debug!("Ignoring own message");
+                            return Ok(())
+                        }
+                        let user = red.u.username;
+                        let out = Message { tags: None, prefix: Some(Prefix::Nickname(user.clone(), user, remote_host)),
+                                    command: Command::PRIVMSG(self.clientinfo.nick.to_string(), red.msg)};
+                        self.client_up.send(out).await?;
+
+                    }
+        
+                    _ => return Ok(()),
+                };
+                /* 
                 if let Some(evt) = ChatEvent::from_room_event(serde_json::from_value(obj.clone())?) {
                     self.client_up.send(evt.into_irc(&self.clientinfo.nick, self.server_addr.clone())).await?
                 } else {
                     warn!("Unsupported Rocket change: {}", obj);
-                }                      
+                } */                     
             },
-            ServerMessage::Updated {..} => {},
+            ServerMessage::Updated {..} => {},   // for RPC completion status, irrelevant for us.
             other => {
                 warn!("Unsupported Rocket event: {}", other.pretty());
             },
