@@ -46,9 +46,9 @@ impl<T: Eq + Clone> Cache<T> {
         id
     }
 
-    pub fn sent(&mut self, id: T) -> bool {
+    pub fn sent(&mut self, id: &T) -> bool {
         for found in &self.cache {
-            if found == &id {
+            if found == id {
                 return true;
             }
         }

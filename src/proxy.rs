@@ -133,7 +133,6 @@ async fn login(c: &mut IRCConn, host: String) -> Result<ClientInfo> {
 
         match (&nick, &user, &pass) {
             (Some(nick), Some(user), Some(pass)) => {
-                respond(c, Response::RPL_WELCOME, vec![nick.clone(), "Welcome to Rocket.chat via IRC proxy".into()]).await?;
                 return Ok(ClientInfo { nick: nick.clone(), user: user.clone(), pass: pass.clone(), host });
             },
 
@@ -166,7 +165,7 @@ async fn recover_username(c: &mut Rasta, id: &UserID) -> Result<String> {
 
 pub struct Proxy {
     clientinfo: ClientInfo,
-    userid: UserID,
+    //userid: UserID,
     session: Session,
     server_up: Handle,
     client_up: SplitSink<IRCConn, Message>,
@@ -210,8 +209,25 @@ impl Proxy {
         let mut clientinfo = login(&mut client, peer.ip().to_string()).await?;
         debug!("Client identified as {}", clientinfo);
 
+        respond(&mut client, Response::RPL_WELCOME,
+            vec![clientinfo.nick.clone(), format!("Welcome to IRC {}", &clientinfo)]).await?;
+        respond(&mut client, Response::RPL_YOURHOST, 
+            vec![clientinfo.nick.clone(), format!("Your host is {}, running croquette v{}", server_addr, env!("CARGO_PKG_VERSION"))]).await?;
+        //respond(&mut client, Response::RPL_CREATED,
+        //     vec![clientinfo.nick.clone(), ??? ]).await?;
+        //respond(&mut client, Response::RPL_MYINFO,
+        //     vec![clientinfo.nick.clone(), ??? ]).await?;
+
+        let server_message = |msg| {
+            Message { tags: None, prefix: Some(Prefix::ServerName(server_addr.to_string()))
+                    , command: Command::PRIVMSG(clientinfo.nick.clone(), msg)
+                    }
+        };
+
+
         let mut back = rasta::Rasta::connect(&server_addr).await?;
         info!("Backend connected");
+        client.send(server_message("Backend connected".into())).await?;
 
         let userid: UserID = match back.login(Credentials::Token(clientinfo.pass.clone())).await? {
             None => {
@@ -226,7 +242,10 @@ impl Proxy {
                 login.id
             }
         };
+
+        client.send(server_message(format!("Logged in successfully as {:?}", userid))).await?;
         
+
         let nick = recover_username(&mut back, &userid).await?;
         client.send(clientinfo.echo_back(Command::NICK(nick.clone()))).await?;
         clientinfo.nick = nick;
@@ -266,7 +285,7 @@ impl Proxy {
 
         let mut server_down = back.stream().fuse();
 
-        let mut proxy = Proxy { clientinfo, userid, session,
+        let mut proxy = Proxy { clientinfo, /*userid,*/ session,
             server_up, client_up, server_addr, message_cache: Cache::new(MessageID::new, 256) };
 
         loop {
@@ -335,7 +354,7 @@ impl Proxy {
 
             },
             Message { command: Command::TOPIC(target, topic),..} => {
-                let session = &self.session;
+                let session = &mut self.session;
                 if let Some(room) = target.strip_prefix('#')
                     .and_then(|chan| session.room_by_name(chan)) {
                         if self.server_up.set_topic(room, topic.clone()).await? {
@@ -348,6 +367,9 @@ impl Proxy {
             },
             other => {
                 warn!("Unsupported IRC command: {:?}", other);
+                self.respond(Response::ERR_UNKNOWNCOMMAND, 
+                    vec!["Command unsupported by Croquette".into()])
+                    .await?;
             },
         };
         Ok(())
@@ -369,8 +391,8 @@ impl Proxy {
 
                 match (event.args.0, event.args.1) {
                     ( RoomEventData {t: Some(t), msg, u, ..} 
-                    , RoomExtraInfo { room_name: Some(room_name) , room_type: 'c', ..}) 
-                        if &t == "room_changed_topic" => {
+                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..}) 
+                        if &t == "room_changed_topic" && (room_type == 'c' || room_type == 'p') => {
                             //ChatEvent::TopicChange { user: u.username, room_name, topic: msg }
                                 let chan = format!("#{}", room_name);
                                 let out = Message { tags: None, prefix: Some(Prefix::Nickname(u.username.clone(), u.username, remote_host)) ,
@@ -378,32 +400,49 @@ impl Proxy {
                                 self.client_up.send(out).await?;
                     },
         
-                    ( red, RoomExtraInfo { room_name: Some(room_name), room_type, ..}) 
-                      if room_type == 'c' || room_type == 'p' => {
-                        if self.message_cache.sent(red.id) {
-                            debug!("Ignoring own message");
-                            return Ok(())
-                        }
-                        let chan = format!("#{}", room_name);
-                        let from = red.u.username;
-                        let out = Message { tags: None, prefix: Some(Prefix::Nickname(from.clone(), from, remote_host)),
-                                    command: Command::PRIVMSG(chan, red.msg)};
-                        self.client_up.send(out).await?;
-            },
-        
-                    ( red, RoomExtraInfo { room_name: None, room_type: 'd',..}) => {
-                        if self.message_cache.sent(red.id) {
-                            debug!("Ignoring own message");
-                            return Ok(())
-                        }
-                        let user = red.u.username;
-                        let out = Message { tags: None, prefix: Some(Prefix::Nickname(user.clone(), user, remote_host)),
-                                    command: Command::PRIVMSG(self.clientinfo.nick.to_string(), red.msg)};
-                        self.client_up.send(out).await?;
+                    ( red, rei ) => {
 
-                    }
-        
-                    _ => return Ok(()),
+                        let target = match (rei.room_type, rei.room_name) {
+                            ('c', Some(name)) => format!("#{}", name),
+                            ('p', Some(name)) => format!("#{}", name), //TODO consider using & for private channels ?
+                            ('d', None) => self.clientinfo.nick.to_string(),
+                            _ => { error!("Incorrect data in RoomExtraInfo"); return Ok(()) },
+                        };
+
+                        let is_new_message = self.session.room_by_id(&red.rid)
+                            .map_or(false, |room| room.is_timestamp_fresh(red.ts));
+
+                        if is_new_message {
+
+                            if self.message_cache.sent(&red.id) {
+                                debug!("Message {:?} sent by us, ignoring", red.id);
+                                return Ok(())
+                            }
+
+                            let user = red.u.username;
+                            let from = Some(Prefix::Nickname(user.clone(), user, remote_host));
+
+                            if red.msg.trim().len() > 0 {
+                                let out = Message { tags: None, prefix: from.clone(),
+                                    command: Command::PRIVMSG(target.clone(), red.msg)};
+
+                                self.client_up.send(out).await?;        
+                            }
+
+                            for file in red.attachments {
+                                let msg = format!("[{}]", file.title);
+                                let out = Message { tags: None, prefix: from.clone(),
+                                    command: Command::PRIVMSG(target.clone(), msg)};
+                                self.client_up.send(out).await?;
+                            }
+
+                        } else {
+                            warn!("Unhandled reaction for {:?}", red);
+                            //TODO handle reactions
+                        }
+
+                    },
+
                 };
                 /* 
                 if let Some(evt) = ChatEvent::from_room_event(serde_json::from_value(obj.clone())?) {
