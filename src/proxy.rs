@@ -181,6 +181,11 @@ impl Proxy {
         Ok(self.client_up.send(msg).await?)
     }
 
+    async fn echo_back(&mut self, cmd: Command) -> Result<()> {
+        let msg = self.clientinfo.echo_back(cmd);
+        Ok(self.client_up.send(msg).await?)
+    }
+
     /*
     async fn send_server_message(&mut self, target: &str, payload: String) -> Result<()> {
 
@@ -218,16 +223,16 @@ impl Proxy {
         //respond(&mut client, Response::RPL_MYINFO,
         //     vec![clientinfo.nick.clone(), ??? ]).await?;
 
-        let server_message = |msg| {
+        let server_notice = |msg| {
             Message { tags: None, prefix: Some(Prefix::ServerName(server_addr.to_string()))
-                    , command: Command::PRIVMSG(clientinfo.nick.clone(), msg)
+                    , command: Command::NOTICE(clientinfo.nick.clone(), msg)
                     }
         };
 
 
         let mut back = rasta::Rasta::connect(&server_addr).await?;
         info!("Backend connected");
-        client.send(server_message("Backend connected".into())).await?;
+        client.send(server_notice("Backend connected".into())).await?;
 
         let userid: UserID = match back.login(Credentials::Token(clientinfo.pass.clone())).await? {
             None => {
@@ -243,7 +248,7 @@ impl Proxy {
             }
         };
 
-        client.send(server_message(format!("Logged in successfully as {:?}", userid))).await?;
+        client.send(server_notice(format!("Logged in successfully as {:?}", userid))).await?;
         
 
         let nick = recover_username(&mut back, &userid).await?;
@@ -324,16 +329,31 @@ impl Proxy {
                                 self.client_up.send(self.clientinfo.echo_back(Command::JOIN(chan.into(), None, None))).await?
                          }
                         } else {
-                            warn!("Room not found: #{}", chan);
+                            warn!("Room not found: {}", chan);
                         }
                     } else {
                         warn!("Other room types not supported");
                     }
                 }
-            }
+            },
+
             Message { command: Command::NICK(_),..} => {
                 self.respond(Response::ERR_NICKNAMEINUSE, vec!["Can't change your nick in rocket, sorry :(".into()]).await?
-            }
+            },
+
+            Message { command: Command::PART(channels, _reason),..} => {
+                for chan in channels.split(",") {
+                    if let Some(name) = chan.strip_prefix('#') {
+                        if let Some(rid) = self.server_up.lookup_room_id(name.into()).await? {
+                            if self.server_up.leave_room(rid).await? {
+                                self.client_up.send(self.clientinfo.echo_back(Command::PART(chan.into(), None))).await?
+                            }
+                        }
+                    }
+                }
+
+            },
+
             Message { command: Command::PING(a,b), ..} => {
                 self.client_up.send(Message { tags: None,
                     prefix: Some(Prefix::ServerName(self.server_addr.clone())),
@@ -400,6 +420,16 @@ impl Proxy {
                                 self.client_up.send(out).await?;
                     },
         
+                    ( RoomEventData {t: Some(t), u, ..} 
+                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..}) 
+                        if &t == "ul" && (room_type == 'c' || room_type == 'p') => {
+                            //ChatEvent::TopicChange { user: u.username, room_name, topic: msg }
+                                let chan = format!("#{}", room_name);
+                                let out = Message { tags: None, prefix: Some(Prefix::Nickname(u.username.clone(), u.username, remote_host)) ,
+                                          command: Command::PART(chan, None)};
+                                self.client_up.send(out).await?;
+                    },
+
                     ( red, rei ) => {
 
                         let target = match (rei.room_type, rei.room_name) {
@@ -430,7 +460,7 @@ impl Proxy {
                             }
 
                             for file in red.attachments {
-                                let msg = format!("[{}]", file.title);
+                                let msg = format!("\x01ACTION [{}]\x01", file.title);
                                 let out = Message { tags: None, prefix: from.clone(),
                                     command: Command::PRIVMSG(target.clone(), msg)};
                                 self.client_up.send(out).await?;
