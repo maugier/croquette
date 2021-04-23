@@ -378,7 +378,8 @@ impl Proxy {
                                 self.client_up.send(out).await?;
                     },
         
-                    ( red, RoomExtraInfo { room_name: Some(room_name), room_type: 'c', ..}) => {
+                    ( red, RoomExtraInfo { room_name: Some(room_name), room_type, ..}) 
+                      if room_type == 'c' || room_type == 'p' => {
                         if self.message_cache.sent(red.id) {
                             debug!("Ignoring own message");
                             return Ok(())
