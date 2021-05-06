@@ -8,7 +8,7 @@ use irc_proto::{Command, IrcCodec, Message, Prefix, Response};
 use futures::{SinkExt, StreamExt, select, stream::SplitSink};
 use rasta::{Credentials, Handle, Rasta, ServerMessage, schema::{MessageID, Room, RoomEvent, RoomEventData, RoomExtraInfo, ShortUser, UserID}, session::Session};
 use crate::util::{Cache, lazy_zip};
-use log::{trace,debug,info,warn,error};
+use log::{debug,info,warn,error};
 
 
 #[derive(Debug)]
@@ -180,31 +180,6 @@ impl Proxy {
             self.clientinfo.nick.clone(), code, args);
         Ok(self.client_up.send(msg).await?)
     }
-
-    async fn echo_back(&mut self, cmd: Command) -> Result<()> {
-        let msg = self.clientinfo.echo_back(cmd);
-        Ok(self.client_up.send(msg).await?)
-    }
-
-    /*
-    async fn send_server_message(&mut self, target: &str, payload: String) -> Result<()> {
-
-        let room = match target.strip_prefix('#') {
-            Some(name) => match self.session.room_by_name(name) {
-                Some(r) => r,
-                None => return Ok(()),
-            },
-            None => {
-                self.session.direct_room(&mut self.server_up, &target).await?
-            }
-        };
-
-        let id = MessageID::new();
-        self.server_up.send_message(id.clone(), room, payload).await?;
-        self.message_cache.send(id);
-        Ok(())
-    }
-    */
 
     async fn run(sock: TcpStream, peer: SocketAddr, server_addr: String) -> Result<()> {
 
