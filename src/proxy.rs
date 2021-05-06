@@ -272,7 +272,7 @@ impl Proxy {
 
                     if let Ok(users) = server_up.get_room_users(room).await {
 
-                        trace!("Got userlist: {:?}", users);
+                        debug!("Got userlist: {:?}", users);
 
                         for msg in build_userlist(&clientinfo.nick, &server_addr, &room, &users) {
                             client.feed(msg).await?;
@@ -463,7 +463,16 @@ impl Proxy {
                             }
 
                             for file in red.attachments {
-                                let msg = format!("\x01ACTION [{}]\x01", file.title);
+
+                                let action = match (file.title, file.image_url) {
+                                    (Some(title), Some(url)) => format!("[{}]({})", title, url),
+                                    (Some(title), None) => format!("[{}]", title),
+                                    (None, Some(url)) => url,
+                                    (None, None) => format!("<UNKNOWN ATTACHMENT>"),
+                                };
+
+                                let msg = format!("\x01ACTION {}\x01", action);
+
                                 let out = Message { tags: None, prefix: from.clone(),
                                     command: Command::PRIVMSG(target.clone(), msg)};
                                 self.client_up.send(out).await?;
