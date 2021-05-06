@@ -176,7 +176,7 @@ pub struct Proxy {
 impl Proxy {
 
     async fn respond(&mut self, code: Response, args: Vec<String>) -> Result<()> {
-        let msg = server_response(&self.server_addr, 
+        let msg = server_response(&self.server_addr,
             self.clientinfo.nick.clone(), code, args);
         Ok(self.client_up.send(msg).await?)
     }
@@ -227,7 +227,7 @@ impl Proxy {
         };
 
         client.send(server_notice(format!("Logged in successfully as {:?}", userid))).await?;
-        
+
 
         let nick = recover_username(&mut back, &userid).await?;
         client.send(clientinfo.echo_back(Command::NICK(nick.clone()))).await?;
@@ -292,7 +292,7 @@ impl Proxy {
     }
 
 
-    
+
 
     async fn handle_client_message(&mut self, msg: Message) -> Result<()> {
         match msg {
@@ -361,18 +361,18 @@ impl Proxy {
                     }
             },
             Message { command: Command::AWAY(reason),..} => {
-                self.server_up.set_away(reason.is_some()).await?;    
+                self.server_up.set_away(reason.is_some()).await?;
             },
             other => {
                 warn!("Unsupported IRC command: {:?}", other);
-                self.respond(Response::ERR_UNKNOWNCOMMAND, 
+                self.respond(Response::ERR_UNKNOWNCOMMAND,
                     vec!["Command unsupported by Croquette".into()])
                     .await?;
             },
         };
         Ok(())
     }
-    
+
     async fn handle_server_message(&mut self, msg: ServerMessage) -> Result<()> {
         match msg {
             ServerMessage::Changed { fields: Some(obj), ..} => {
@@ -388,8 +388,8 @@ impl Proxy {
                 let remote_host = self.server_addr.clone();
 
                 match (event.args.0, event.args.1) {
-                    ( RoomEventData {t: Some(t), msg, u, ..} 
-                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..}) 
+                    ( RoomEventData {t: Some(t), msg, u, ..}
+                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..})
                         if &t == "room_changed_topic" && (room_type == 'c' || room_type == 'p') => {
                             //ChatEvent::TopicChange { user: u.username, room_name, topic: msg }
                                 let chan = format!("#{}", room_name);
@@ -397,9 +397,9 @@ impl Proxy {
                                           command: Command::TOPIC(chan, Some(msg))};
                                 self.client_up.send(out).await?;
                     },
-        
-                    ( RoomEventData {t: Some(t), u, ..} 
-                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..}) 
+
+                    ( RoomEventData {t: Some(t), u, ..}
+                    , RoomExtraInfo { room_name: Some(room_name) , room_type, ..})
                         if &t == "ul" && (room_type == 'c' || room_type == 'p') => {
                             //ChatEvent::TopicChange { user: u.username, room_name, topic: msg }
                                 let chan = format!("#{}", room_name);
@@ -434,7 +434,7 @@ impl Proxy {
                                 let out = Message { tags: None, prefix: from.clone(),
                                     command: Command::PRIVMSG(target.clone(), red.msg)};
 
-                                self.client_up.send(out).await?;        
+                                self.client_up.send(out).await?;
                             }
 
                             for file in red.attachments {
@@ -461,12 +461,12 @@ impl Proxy {
                     },
 
                 };
-                /* 
+                /*
                 if let Some(evt) = ChatEvent::from_room_event(serde_json::from_value(obj.clone())?) {
                     self.client_up.send(evt.into_irc(&self.clientinfo.nick, self.server_addr.clone())).await?
                 } else {
                     warn!("Unsupported Rocket change: {}", obj);
-                } */                     
+                } */
             },
             ServerMessage::Updated {..} => {},   // for RPC completion status, irrelevant for us.
             other => {
