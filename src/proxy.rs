@@ -214,25 +214,28 @@ impl Proxy {
         let mut clientinfo = login(&mut client, peer.ip().to_string()).await?;
         debug!("Client identified as {}", clientinfo);
 
-        respond(&mut client, Response::RPL_WELCOME,
-            vec![clientinfo.nick.clone(), format!("Welcome to IRC {}", &clientinfo)]).await?;
-        respond(&mut client, Response::RPL_YOURHOST, 
-            vec![clientinfo.nick.clone(), format!("Your host is {}, running croquette v{}", server_addr, env!("CARGO_PKG_VERSION"))]).await?;
-        //respond(&mut client, Response::RPL_CREATED,
-        //     vec![clientinfo.nick.clone(), ??? ]).await?;
-        //respond(&mut client, Response::RPL_MYINFO,
-        //     vec![clientinfo.nick.clone(), ??? ]).await?;
-
         let server_notice = |msg| {
             Message { tags: None, prefix: Some(Prefix::ServerName(server_addr.to_string()))
                     , command: Command::NOTICE(clientinfo.nick.clone(), msg)
                     }
         };
 
+        client.send(server_notice("Please wait while we login into rocket...".into())).await?;
 
         let mut back = rasta::Rasta::connect(&server_addr).await?;
         info!("Backend connected");
         client.send(server_notice("Backend connected".into())).await?;
+
+        respond(&mut client, Response::RPL_WELCOME,
+            vec![clientinfo.nick.clone(), format!("Welcome to IRC {}", &clientinfo)]).await?;
+        respond(&mut client, Response::RPL_YOURHOST,
+            vec![clientinfo.nick.clone(), format!("Your host is {}, running croquette v{}", server_addr, env!("CARGO_PKG_VERSION"))]).await?;
+        //respond(&mut client, Response::RPL_CREATED,
+        //     vec![clientinfo.nick.clone(), ??? ]).await?;
+        //respond(&mut client, Response::RPL_MYINFO,
+        //     vec![clientinfo.nick.clone(), ??? ]).await?;
+
+
 
         let userid: UserID = match back.login(Credentials::Token(clientinfo.pass.clone())).await? {
             None => {
