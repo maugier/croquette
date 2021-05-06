@@ -138,7 +138,7 @@ async fn login(c: &mut IRCConn, host: String) -> Result<ClientInfo> {
 
             (Some(nick), Some(_), None) => {
                 respond(c, Response::ERR_PASSWDMISMATCH, vec![nick.clone(), "Please send your rocket authentication token".into()]).await?;
-            }, 
+            },
             _ => {},
         }
 
@@ -212,7 +212,7 @@ impl Proxy {
 
 
 
-        let userid: UserID = match back.login(Credentials::Token(clientinfo.pass.clone())).await? {
+        let userid: UserID = match back.login(Credentials::from(clientinfo.pass.clone())).await? {
             None => {
                 respond(&mut client, Response::ERR_PASSWDMISMATCH,
                 vec![
@@ -238,22 +238,22 @@ impl Proxy {
 
         for room in session.rooms() {
             match room {
-                Room::Chat { name, topic, ..} => {
+                Room::Chat { name, topic, ..} |
+                Room::Private { name, topic, ..} => {
                     let channel_name= format!("#{}", name);
                     client.send(clientinfo.echo_back(Command::JOIN(channel_name.clone(), None, None))).await?;
                     if let Some(topic) = topic {
                         respond(&mut client, Response::RPL_TOPIC, vec![clientinfo.nick.to_string(), channel_name, topic.clone()]).await?;
                     }
 
-                    if let Ok(users) = server_up.get_room_users(room).await {
+                    let users = server_up.get_room_users(room).await?;
 
-                        debug!("Got userlist: {:?}", users);
+                    debug!("Got userlist: {:?}", users);
 
-                        for msg in build_userlist(&clientinfo.nick, &server_addr, &room, &users) {
-                            client.feed(msg).await?;
-                        }
-                        client.flush().await?;
+                    for msg in build_userlist(&clientinfo.nick, &server_addr, &room, &users) {
+                        client.feed(msg).await?;
                     }
+                    client.flush().await?;
 
                 },
                 _ => {},
